@@ -168,7 +168,7 @@ app.get('/riders/pending', verifyFBToken, asyncHandler(async (req, res) => {
         const pendingRiders = await ridersCollection.find({ status: "pending" })
             .sort({ createdAt: -1 })
             .toArray();
-            
+
         res.json({
             success: true,
             data: pendingRiders
@@ -186,7 +186,7 @@ app.get('/riders/active', verifyFBToken, asyncHandler(async (req, res) => {
     try {
         const { search } = req.query;
         let query = { status: 'active' };
-        
+
         if (search) {
             query.$or = [
                 { name: { $regex: search, $options: 'i' } },
@@ -198,7 +198,7 @@ app.get('/riders/active', verifyFBToken, asyncHandler(async (req, res) => {
         const activeRiders = await ridersCollection.find(query)
             .sort({ updatedAt: -1 })
             .toArray();
-            
+
         res.json({
             success: true,
             data: activeRiders
@@ -215,7 +215,7 @@ app.get('/riders/active', verifyFBToken, asyncHandler(async (req, res) => {
 app.post('/riders', asyncHandler(async (req, res) => {
     try {
         const rider = req.body;
-        
+
         // Check if rider already exists
         // const existingRider = await ridersCollection.findOne({ 
         //     $or: [
@@ -223,7 +223,7 @@ app.post('/riders', asyncHandler(async (req, res) => {
         //         { phone: rider.phone }
         //     ]
         // });
-        
+
         // if (existingRider) {
         //     return res.status(400).json({
         //         success: false,
@@ -238,9 +238,9 @@ app.post('/riders', asyncHandler(async (req, res) => {
             createdAt: new Date(),
             updatedAt: new Date()
         };
-        
+
         const result = await ridersCollection.insertOne(newRider);
-        
+
         res.status(201).json({
             success: true,
             message: 'Rider application submitted successfully',
@@ -263,21 +263,21 @@ app.get('/riders/:id', verifyFBToken, asyncHandler(async (req, res) => {
         const { id } = req.params;
 
         if (!ObjectId.isValid(id)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid rider ID' 
+                message: 'Invalid rider ID'
             });
         }
 
         const rider = await ridersCollection.findOne({ _id: new ObjectId(id) });
-        
+
         if (!rider) {
-            return res.status(404).json({ 
+            return res.status(404).json({
                 success: false,
-                message: "Rider not found" 
+                message: "Rider not found"
             });
         }
-        
+
         res.json({
             success: true,
             data: rider
@@ -296,29 +296,29 @@ app.put('/riders/:id/approve', verifyFBToken, asyncHandler(async (req, res) => {
         const { id } = req.params;
 
         if (!ObjectId.isValid(id)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid rider ID' 
+                message: 'Invalid rider ID'
             });
         }
 
         const result = await ridersCollection.updateOne(
             { _id: new ObjectId(id), status: 'pending' },
-            { 
-                $set: { 
+            {
+                $set: {
                     status: "active",
-                    updatedAt: new Date() 
-                } 
+                    updatedAt: new Date()
+                }
             }
         );
-        
+
         if (result.modifiedCount === 0) {
-            return res.status(404).json({ 
+            return res.status(404).json({
                 success: false,
-                message: "Rider not found or already processed" 
+                message: "Rider not found or already processed"
             });
         }
-        
+
         res.json({
             success: true,
             message: "Rider approved successfully",
@@ -340,29 +340,29 @@ app.put('/riders/:id/reject', verifyFBToken, asyncHandler(async (req, res) => {
         const { id } = req.params;
 
         if (!ObjectId.isValid(id)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid rider ID' 
+                message: 'Invalid rider ID'
             });
         }
 
         const result = await ridersCollection.updateOne(
             { _id: new ObjectId(id), status: 'pending' },
-            { 
-                $set: { 
+            {
+                $set: {
                     status: "rejected",
-                    updatedAt: new Date() 
-                } 
+                    updatedAt: new Date()
+                }
             }
         );
-        
+
         if (result.modifiedCount === 0) {
-            return res.status(404).json({ 
+            return res.status(404).json({
                 success: false,
-                message: "Rider not found or already processed" 
+                message: "Rider not found or already processed"
             });
         }
-        
+
         res.json({
             success: true,
             message: "Rider rejected successfully",
@@ -379,51 +379,77 @@ app.put('/riders/:id/reject', verifyFBToken, asyncHandler(async (req, res) => {
     }
 }));
 
+
+
+
+
+
+
+
+
+
 app.patch('/riders/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
-        const { status } = req.body;
+        const { status, email } = req.body;
 
         if (!ObjectId.isValid(id)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid rider ID' 
+                message: 'Invalid rider ID'
             });
         }
 
-        // Validate status value
+        // Validate status
         const validStatuses = ['active', 'inactive', 'deactivated'];
         if (!validStatuses.includes(status)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid status value. Allowed values: active, inactive, deactivated' 
+                message: 'Invalid status value. Allowed values: active, inactive, deactivated'
             });
         }
 
-        const result = await ridersCollection.updateOne(
+        // Update rider's status
+        const riderResult = await ridersCollection.updateOne(
             { _id: new ObjectId(id) },
-            { 
-                $set: { 
+            {
+                $set: {
                     status: status,
-                    updatedAt: new Date() 
-                } 
+                    updatedAt: new Date()
+                }
             }
         );
 
-        if (result.modifiedCount === 0) {
-            return res.status(404).json({ 
+        if (riderResult.modifiedCount === 0) {
+            return res.status(404).json({
                 success: false,
-                message: 'Rider not found or status unchanged' 
+                message: 'Rider not found or status unchanged'
             });
         }
 
+        // If rider is activated, update user role to 'rider'
+        if (status === 'active' && email) {
+            const userResult = await userCollection.updateOne(
+                { email: { $regex: `^${email.trim()}$`, $options: 'i' } }, // case-insensitive match
+                {
+                    $set: { role: 'rider' }
+                }
+            );
+
+            console.log('User role update result:', userResult);
+
+            if (userResult.matchedCount === 0) {
+                console.warn('No matching user found for email:', email);
+            }
+        }
+
+        // Send success response
         res.json({
             success: true,
             message: `Rider status updated to ${status} successfully`,
-            data: {
-                status: status
-            }
+            data: { status }
         });
+
     } catch (error) {
         console.error('Error updating rider status:', error);
         res.status(500).json({
@@ -433,26 +459,40 @@ app.patch('/riders/:id/status', verifyFBToken, asyncHandler(async (req, res) => 
     }
 }));
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 app.delete('/riders/:id', verifyFBToken, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
 
         if (!ObjectId.isValid(id)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid rider ID' 
+                message: 'Invalid rider ID'
             });
         }
 
         const result = await ridersCollection.deleteOne({ _id: new ObjectId(id) });
-        
+
         if (result.deletedCount === 0) {
-            return res.status(404).json({ 
+            return res.status(404).json({
                 success: false,
-                message: "Rider not found" 
+                message: "Rider not found"
             });
         }
-        
+
         res.json({
             success: true,
             message: "Rider deleted successfully"
@@ -573,7 +613,7 @@ app.post('/payments', verifyFBToken, asyncHandler(async (req, res) => {
 app.get('/users/:email', verifyFBToken, async (req, res) => {
     try {
         const { email } = req.params;
-        
+
         const user = await userCollection.findOne({ email });
         if (!user) {
             return res.status(404).json({
@@ -582,9 +622,12 @@ app.get('/users/:email', verifyFBToken, async (req, res) => {
             });
         }
 
+        // Remove sensitive data before sending
+        const { password, ...userData } = user;
+
         res.json({
             success: true,
-            data: user
+            data: userData
         });
     } catch (error) {
         console.error('Error fetching user:', error);
@@ -608,9 +651,18 @@ app.put('/users/update', verifyFBToken, async (req, res) => {
             });
         }
 
+        // Prepare update data
+        const updateData = {
+            name: updates.name,
+            phone: updates.phone,
+            address: updates.address,
+            photoURL: updates.photoURL,
+            updatedAt: new Date().toISOString()
+        };
+
         const result = await userCollection.updateOne(
             { email },
-            { $set: updates }
+            { $set: updateData }
         );
 
         if (result.matchedCount === 0) {
@@ -620,10 +672,14 @@ app.put('/users/update', verifyFBToken, async (req, res) => {
             });
         }
 
+        // Get updated user data to return
+        const updatedUser = await userCollection.findOne({ email });
+        const { password, ...userData } = updatedUser;
+
         res.json({
             success: true,
             message: 'Profile updated successfully',
-            data: result
+            data: userData
         });
     } catch (error) {
         console.error('Error updating profile:', error);
@@ -633,6 +689,11 @@ app.put('/users/update', verifyFBToken, async (req, res) => {
         });
     }
 });
+
+
+
+
+
 
 
 

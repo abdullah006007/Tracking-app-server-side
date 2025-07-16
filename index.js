@@ -30,7 +30,7 @@ const client = new MongoClient(uri, {
 });
 
 // Database collections
-let db, userCollection, parcelCollection, paymentsCollection, ridersCollection, trackingCollection;
+let db, userCollection, parcelCollection, paymentsCollection, ridersCollection, trackingCollection, assignmentsCollection;
 
 async function connectDB() {
     try {
@@ -41,6 +41,7 @@ async function connectDB() {
         paymentsCollection = db.collection('payments');
         ridersCollection = db.collection('riders');
         trackingCollection = db.collection('tracking');
+        assignmentsCollection = db.collection('assignments');
 
         // Create indexes
         await parcelCollection.createIndex({ trackingNumber: 1 });
@@ -78,7 +79,28 @@ const verifyFBToken = async (req, res, next) => {
     catch (error) {
         return res.status(403).send({ message: 'forbidden access' });
     }
+
 }
+
+
+
+
+
+
+
+// verifyAdmin
+const verifyAdmin = async (req, res, next) => {
+    const email = req.decoded.email;
+    const query = { email }
+    const user = await userCollection.findOne(query)
+    if (!user || user.role !== 'admin') {
+        return res.status(403).send({ message: 'forbidden access' })
+    }
+    next();
+}
+
+
+
 
 // Helper middleware for error handling
 const asyncHandler = (fn) => (req, res, next) => {
@@ -89,6 +111,84 @@ const asyncHandler = (fn) => (req, res, next) => {
 app.get('/', (req, res) => {
     res.send('📦 Parcel Tracking Server is Running');
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// user role
+
+// GET: Get user role by email
+app.get('/users/role/:email', verifyFBToken, async (req, res) => {
+    try {
+        const email = req.params.email;
+
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+
+        // Verify the requesting user can only check their own role
+        if (req.decoded.email !== email) {
+            return res.status(403).json({ message: 'Unauthorized access' });
+        }
+
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        res.status(200).json({
+            role: user.role || 'user',
+            email: user.email
+        });
+    } catch (error) {
+        console.error('Error getting user role:', error);
+        res.status(500).json({ message: 'Failed to get role', error: error.message });
+    }
+});
+
+
+
+
+
+
+// app.get('/parcels', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+//     const { status, email } = req.query;
+//     const filter = {};
+
+//     if (email) {
+//         filter.userEmail = email;
+//     }
+//     if (status) {
+//         filter['deliveryStatus.status'] = status;
+//     }
+
+//     const parcels = await parcelCollection.find(filter)
+//         .sort({ _id: -1 })
+//         .toArray();
+
+//     res.json(parcels);
+// }));
+
+
+
+
+
+
+
+
+
 
 // User routes
 app.post('/users', async (req, res) => {
@@ -146,6 +246,204 @@ app.post('/parcels', asyncHandler(async (req, res) => {
     res.status(201).json(result);
 }));
 
+
+
+
+
+
+
+
+
+
+// for assign rider 
+
+// Assign rider to a parcel
+// Assign rider to a parcel
+// Updated assign endpoint
+// app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
+//     const { id } = req.params;
+//     const { riderId, riderName, riderPhone, status } = req.body;
+
+//     if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+//         return res.status(400).json({ message: 'Invalid ID(s)' });
+//     }
+
+//     const session = client.startSession();
+//     try {
+//         await session.withTransaction(async () => {
+//             // 1. Update parcel with rider assignment
+//             const parcelUpdate = await parcelCollection.updateOne(
+//                 { _id: new ObjectId(id) },
+//                 {
+//                     $set: {
+//                         assigned_rider_id: new ObjectId(riderId),
+//                         assigned_rider_name: riderName,
+//                         assigned_rider_phone: riderPhone,
+//                         deliveryStatus: status || 'in_transit',
+//                         updatedAt: new Date().toISOString()
+//                     },
+//                     $push: {
+//                         statusHistory: {
+//                             status: status || 'in_transit',
+//                             changedAt: new Date().toISOString(),
+//                             changedBy: req.decoded.email || 'system',
+//                             details: `Assigned to rider ${riderName}`
+//                         }
+//                     }
+//                 },
+//                 { session }
+//             );
+
+//             if (parcelUpdate.modifiedCount === 0) {
+//                 throw new Error('Parcel not found or update failed');
+//             }
+
+//             // 2. Update rider's status
+//             await ridersCollection.updateOne(
+//                 { _id: new ObjectId(riderId) },
+//                 {
+//                     $set: {
+//                         status: 'active',
+//                         work_status: 'in_delivery',
+//                         updatedAt: new Date().toISOString()
+//                     }
+//                 },
+//                 { session }
+//             );
+
+//             res.json({
+//                 success: true,
+//                 message: 'Rider assigned successfully'
+//             });
+//         });
+//     } catch (error) {
+//         console.error('Assignment transaction failed:', error);
+//         res.status(500).json({
+//             success: false,
+//             message: 'Failed to assign rider',
+//             error: error.message
+//         });
+//     } finally {
+//         await session.endSession();
+//     }
+// }));
+
+
+
+
+// Improved available riders endpoint
+app.get('/riders/available', verifyFBToken, asyncHandler(async (req, res) => {
+    const { district, search } = req.query;
+
+    try {
+        const query = {
+            status: 'active',
+            work_status: 'available'
+        };
+
+        if (district) {
+            query.district = district;
+        }
+
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { email: { $regex: search, $options: 'i' } },
+                { phone: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const riders = await ridersCollection.find(query)
+            .project({
+                name: 1,
+                email: 1,
+                phone: 1,
+                district: 1,
+                vehicleType: 1,
+                vehicleNumber: 1,
+                status: 1,
+                work_status: 1
+            })
+            .sort({ name: 1 })
+            .toArray();
+
+        res.json({
+            success: true,
+            data: riders
+        });
+    } catch (error) {
+        console.error('Error fetching available riders:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch available riders'
+        });
+    }
+}));
+
+
+
+app.get('/parcels/assignable', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const parcels = await parcelCollection.aggregate([
+            {
+                $match: {
+                    paymentStatus: 'Paid',
+                    $or: [
+                        { 'deliveryStatus.status': { $exists: false } },
+                        { 'deliveryStatus.status': { $nin: ['delivered', 'cancelled'] } }
+                    ]
+                }
+            },
+            {
+                $lookup: {
+                    from: 'riders',
+                    localField: 'assigned_rider_id',
+                    foreignField: '_id',
+                    as: 'rider'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$rider',
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $sort: { createdAt: 1 }
+            }
+        ]).toArray();
+
+        res.json({
+            success: true,
+            data: parcels
+        });
+    } catch (error) {
+        console.error('Error fetching assignable parcels:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch assignable parcels'
+        });
+    }
+}));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 app.delete('/parcels/:id', asyncHandler(async (req, res) => {
     const { id } = req.params;
 
@@ -163,7 +461,7 @@ app.delete('/parcels/:id', asyncHandler(async (req, res) => {
 }));
 
 // Rider routes - Updated and improved
-app.get('/riders/pending', verifyFBToken, asyncHandler(async (req, res) => {
+app.get('/riders/pending', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const pendingRiders = await ridersCollection.find({ status: "pending" })
             .sort({ createdAt: -1 })
@@ -182,7 +480,7 @@ app.get('/riders/pending', verifyFBToken, asyncHandler(async (req, res) => {
     }
 }));
 
-app.get('/riders/active', verifyFBToken, asyncHandler(async (req, res) => {
+app.get('/riders/active', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const { search } = req.query;
         let query = { status: 'active' };
@@ -258,7 +556,7 @@ app.post('/riders', asyncHandler(async (req, res) => {
     }
 }));
 
-app.get('/riders/:id', verifyFBToken, asyncHandler(async (req, res) => {
+app.get('/riders/:id', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -291,51 +589,51 @@ app.get('/riders/:id', verifyFBToken, asyncHandler(async (req, res) => {
     }
 }));
 
-app.put('/riders/:id/approve', verifyFBToken, asyncHandler(async (req, res) => {
-    try {
-        const { id } = req.params;
+// app.put('/riders/:id/approve', verifyFBToken, asyncHandler(async (req, res) => {
+//     try {
+//         const { id } = req.params;
 
-        if (!ObjectId.isValid(id)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid rider ID'
-            });
-        }
+//         if (!ObjectId.isValid(id)) {
+//             return res.status(400).json({
+//                 success: false,
+//                 message: 'Invalid rider ID'
+//             });
+//         }
 
-        const result = await ridersCollection.updateOne(
-            { _id: new ObjectId(id), status: 'pending' },
-            {
-                $set: {
-                    status: "active",
-                    updatedAt: new Date()
-                }
-            }
-        );
+//         const result = await ridersCollection.updateOne(
+//             { _id: new ObjectId(id), status: 'pending' },
+//             {
+//                 $set: {
+//                     status: "active",
+//                     updatedAt: new Date()
+//                 }
+//             }
+//         );
 
-        if (result.modifiedCount === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Rider not found or already processed"
-            });
-        }
+//         if (result.modifiedCount === 0) {
+//             return res.status(404).json({
+//                 success: false,
+//                 message: "Rider not found or already processed"
+//             });
+//         }
 
-        res.json({
-            success: true,
-            message: "Rider approved successfully",
-            data: {
-                status: 'active'
-            }
-        });
-    } catch (error) {
-        console.error('Error approving rider:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to approve rider'
-        });
-    }
-}));
+//         res.json({
+//             success: true,
+//             message: "Rider approved successfully",
+//             data: {
+//                 status: 'active'
+//             }
+//         });
+//     } catch (error) {
+//         console.error('Error approving rider:', error);
+//         res.status(500).json({
+//             success: false,
+//             message: 'Failed to approve rider'
+//         });
+//     }
+// }));
 
-app.put('/riders/:id/reject', verifyFBToken, asyncHandler(async (req, res) => {
+app.put('/riders/:id/reject', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -383,12 +681,77 @@ app.put('/riders/:id/reject', verifyFBToken, asyncHandler(async (req, res) => {
 
 
 
+// assign api 
+// Example backend route (Node.js/Express)
+// app.patch('/parcels/:id/assign', async (req, res) => {
+//     try {
+//         const { 
+//             riderId, 
+//             riderName, 
+//             riderPhone, 
+//             status,
+//             deliveryStatus 
+//         } = req.body;
+
+//         // Update parcel with rider and status
+//         const updatedParcel = await Parcel.findByIdAndUpdate(
+//             req.params.id,
+//             {
+//                 $set: {
+//                     rider: riderId,
+//                     riderName: riderName,
+//                     riderPhone: riderPhone,
+//                     status: status,
+//                     updatedAt: new Date(),
+//                     deliveryStatus: deliveryStatus
+//                 },
+//                 $push: {
+//                     statusHistory: {
+//                         status: status,
+//                         changedAt: new Date(),
+//                         changedBy: req.user?.id || 'system' // fallback to 'system' if no user
+//                     }
+//                 }
+//             },
+//             { new: true }
+//         );
+
+//         if (!updatedParcel) {
+//             return res.status(404).json({ message: 'Parcel not found' });
+//         }
+
+//         res.json({
+//             success: true,
+//             data: {
+//                 _id: updatedParcel._id,
+//                 trackingNumber: updatedParcel.trackingNumber,
+//                 status: updatedParcel.status,
+//                 rider: {
+//                     _id: riderId,
+//                     name: riderName,
+//                     phone: riderPhone
+//                 }
+//             }
+//         });
+//     } catch (error) {
+//         res.status(500).json({ 
+//             success: false,
+//             message: error.message 
+//         });
+//     }
+// });
 
 
 
 
 
-app.patch('/riders/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
+
+
+
+
+
+
+app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
         const { status, email } = req.body;
@@ -465,6 +828,82 @@ app.patch('/riders/:id/status', verifyFBToken, asyncHandler(async (req, res) => 
 
 
 
+
+// new put 
+app.put('/riders/:id/approve', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { email } = req.body; // Get email from request body
+
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid rider ID'
+            });
+        }
+
+        // Start a session for transaction
+        const session = client.startSession();
+        let result;
+
+        try {
+            await session.withTransaction(async () => {
+                // 1. Update rider status
+                const riderResult = await ridersCollection.updateOne(
+                    { _id: new ObjectId(id), status: 'pending' },
+                    {
+                        $set: {
+                            status: "active",
+                            updatedAt: new Date()
+                        }
+                    },
+                    { session }
+                );
+
+                if (riderResult.modifiedCount === 0) {
+                    throw new Error("Rider not found or already processed");
+                }
+
+                // 2. Update user role to 'rider'
+                if (email) {
+                    const userResult = await userCollection.updateOne(
+                        { email: email },
+                        {
+                            $set: {
+                                role: 'rider',
+                                updatedAt: new Date().toISOString()
+                            }
+                        },
+                        { session }
+                    );
+
+                    if (userResult.matchedCount === 0) {
+                        console.warn(`No user found with email: ${email}`);
+                    }
+                }
+            });
+
+            result = {
+                success: true,
+                message: "Rider approved and user role updated successfully",
+                data: {
+                    status: 'active'
+                }
+            };
+        } finally {
+            await session.endSession();
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('Error approving rider:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to approve rider',
+            error: error.message
+        });
+    }
+}));
 
 
 
@@ -689,6 +1128,439 @@ app.put('/users/update', verifyFBToken, async (req, res) => {
         });
     }
 });
+
+
+// Assign rider to parcel
+// app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
+//     const { id } = req.params;
+//     const { riderId, riderName, riderPhone, status } = req.body;
+
+//     if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+//         return res.status(400).json({ message: 'Invalid ID(s)' });
+//     }
+
+//     const session = client.startSession();
+//     try {
+//         await session.withTransaction(async () => {
+//             // 1. Update parcel with rider assignment
+//             const parcelUpdate = await parcelCollection.updateOne(
+//                 { _id: new ObjectId(id) },
+//                 {
+//                     $set: {
+//                         assigned_rider_id: new ObjectId(riderId),
+//                         assigned_rider_name: riderName,
+//                         assigned_rider_phone: riderPhone,
+//                         deliveryStatus: status || 'in_transit',
+//                         updatedAt: new Date().toISOString()
+//                     },
+//                     $push: {
+//                         statusHistory: {
+//                             status: status || 'in_transit',
+//                             changedAt: new Date().toISOString(),
+//                             changedBy: req.decoded.email || 'system',
+//                             details: `Assigned to rider ${riderName}`
+//                         }
+//                     }
+//                 },
+//                 { session }
+//             );
+
+//             if (parcelUpdate.modifiedCount === 0) {
+//                 throw new Error('Parcel not found or update failed');
+//             }
+
+//             // 2. Update rider's status
+//             await ridersCollection.updateOne(
+//                 { _id: new ObjectId(riderId) },
+//                 {
+//                     $set: {
+//                         status: 'active',
+//                         work_status: 'in_delivery',
+//                         updatedAt: new Date().toISOString()
+//                     }
+//                 },
+//                 { session }
+//             );
+
+//             res.json({
+//                 success: true,
+//                 message: 'Rider assigned successfully'
+//             });
+//         });
+//     } catch (error) {
+//         console.error('Assignment transaction failed:', error);
+//         res.status(500).json({
+//             success: false,
+//             message: 'Failed to assign rider',
+//             error: error.message
+//         });
+//     } finally {
+//         await session.endSession();
+//     }
+// }));
+
+
+
+// Updated assign endpoint
+app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { riderId, riderName, riderPhone, status, deliveryStatus } = req.body;
+
+    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+        return res.status(400).json({ message: 'Invalid ID(s)' });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Update parcel with rider assignment
+            const parcelUpdate = await parcelCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
+                    $set: {
+                        assigned_rider_id: new ObjectId(riderId),
+                        assigned_rider_name: riderName,
+                        assigned_rider_phone: riderPhone,
+                        status: status || 'assigned',
+                        updatedAt: new Date().toISOString()
+                    },
+                    $push: {
+                        deliveryStatus: deliveryStatus || {
+                            status: 'in_transit',
+                            date: new Date().toISOString(),
+                            location: 'Warehouse',
+                            details: `Assigned to rider ${riderName}`,
+                            changedBy: req.decoded.email || 'system'
+                        }
+                    }
+                },
+                { session }
+            );
+
+            if (parcelUpdate.modifiedCount === 0) {
+                throw new Error('Parcel not found or update failed');
+            }
+
+            // 2. Update rider's status
+            await ridersCollection.updateOne(
+                { _id: new ObjectId(riderId) },
+                {
+                    $set: {
+                        status: 'active',
+                        work_status: 'in_delivery',
+                        updatedAt: new Date().toISOString()
+                    }
+                },
+                { session }
+            );
+
+            res.json({
+                success: true,
+                message: 'Rider assigned successfully'
+            });
+        });
+    } catch (error) {
+        console.error('Assignment transaction failed:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to assign rider',
+            error: error.message
+        });
+    } finally {
+        await session.endSession();
+    }
+}));
+
+
+
+// Update parcel delivery status
+// Improved status update endpoint
+// Update parcel delivery status - Fixed version
+app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { status, location, details } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: 'Invalid parcel ID' });
+    }
+
+    const validStatuses = ['pending', 'in_transit', 'delivered', 'cancelled'];
+    if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Invalid status value' });
+    }
+
+    const statusUpdate = {
+        status,
+        date: new Date().toISOString(),
+        location: location || 'Unknown',
+        details: details || `Status changed to ${status}`,
+        changedBy: req.decoded.email || 'system'
+    };
+
+    try {
+        // First get the current parcel to check its structure
+        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
+        if (!parcel) {
+            return res.status(404).json({ message: 'Parcel not found' });
+        }
+
+        // Prepare the update based on current structure
+        let updateOperation;
+
+        if (Array.isArray(parcel.deliveryStatus)) {
+            // Case 1: deliveryStatus is already an array
+            updateOperation = {
+                $set: {
+                    updatedAt: new Date().toISOString()
+                },
+                $push: {
+                    deliveryStatus: statusUpdate
+                }
+            };
+        } else if (typeof parcel.deliveryStatus === 'string' || !parcel.deliveryStatus) {
+            // Case 2: deliveryStatus is a string or doesn't exist
+            updateOperation = {
+                $set: {
+                    updatedAt: new Date().toISOString(),
+                    deliveryStatus: [statusUpdate] // Initialize as array with first status
+                }
+            };
+        } else {
+            // Unknown structure - handle error
+            return res.status(400).json({
+                message: 'Invalid deliveryStatus format in database'
+            });
+        }
+
+        const result = await parcelCollection.updateOne(
+            { _id: new ObjectId(id) },
+            updateOperation
+        );
+
+        if (result.modifiedCount === 0) {
+            return res.status(404).json({ message: 'Parcel not found or status unchanged' });
+        }
+
+        // If status is delivered, update rider's status to available
+        if (status === 'delivered') {
+            if (parcel.assigned_rider_id) {
+                await ridersCollection.updateOne(
+                    { _id: parcel.assigned_rider_id },
+                    { $set: { work_status: 'available' } }
+                );
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Parcel status updated successfully',
+            data: statusUpdate
+        });
+    } catch (error) {
+        console.error('Error updating status:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update status',
+            error: error.message
+        });
+    }
+}));
+
+
+
+// Assign rider 
+
+// Assign rider to parcel - new endpoint
+app.patch('/parcels/:id/assign-rider', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { riderId, riderName, riderPhone } = req.body;
+
+    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+        return res.status(400).json({ message: 'Invalid ID(s)' });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Update parcel with rider assignment
+            const parcelUpdate = await parcelCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
+                    $set: {
+                        assigned_rider_id: new ObjectId(riderId),
+                        assigned_rider_name: riderName,
+                        assigned_rider_phone: riderPhone,
+                        updatedAt: new Date().toISOString()
+                    },
+                    $push: {
+                        deliveryStatus: {
+                            status: 'in_transit',
+                            date: new Date().toISOString(),
+                            location: 'Warehouse',
+                            details: `Assigned to rider ${riderName}`,
+                            changedBy: req.decoded.email || 'system'
+                        }
+                    }
+                },
+                { session }
+            );
+
+            if (parcelUpdate.modifiedCount === 0) {
+                throw new Error('Parcel not found or update failed');
+            }
+
+            // 2. Update rider's status
+            await ridersCollection.updateOne(
+                { _id: new ObjectId(riderId) },
+                {
+                    $set: {
+                        work_status: 'in_delivery',
+                        updatedAt: new Date().toISOString()
+                    }
+                },
+                { session }
+            );
+
+            res.json({
+                success: true,
+                message: 'Rider assigned successfully'
+            });
+        });
+    } catch (error) {
+        console.error('Assignment transaction failed:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to assign rider',
+            error: error.message
+        });
+    } finally {
+        await session.endSession();
+    }
+}));
+
+
+
+
+
+
+
+// admin role
+
+// Admin routes
+app.get('/admin/users/search', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const { email, role } = req.query;
+        const query = {};
+
+        if (email) {
+            query.email = { $regex: email, $options: 'i' };
+        }
+        if (role) {
+            query.role = role;
+        }
+
+        // Only return essential fields
+        const users = await userCollection.find(query)
+            .project({ email: 1, role: 1, createdAt: 1, name: 1, _id: 1 })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .toArray();
+
+        res.json({
+            success: true,
+            data: users
+        });
+    } catch (error) {
+        console.error('Error searching users:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to search users'
+        });
+    }
+}));
+
+app.put('/admin/users/:id/make-admin', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
+            });
+        }
+
+        const result = await userCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { role: 'admin', updatedAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'User role updated to admin successfully'
+        });
+    } catch (error) {
+        console.error('Error making user admin:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update user role'
+        });
+    }
+}));
+
+app.put('/admin/users/:id/remove-admin', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
+            });
+        }
+
+        const result = await userCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { role: 'user', updatedAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Admin privileges removed successfully'
+        });
+    } catch (error) {
+        console.error('Error removing admin:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update user role'
+        });
+    }
+}));
+
+
+
+
+
+
+
+
+
+
+
 
 
 

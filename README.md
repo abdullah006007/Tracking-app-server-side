@@ -1,7 +1,7 @@
 # 🚚 Parcel Tracking – Server Side
 
 **Live API Endpoint:** [https://tracking-server-side.vercel.app](https://tracking-server-side.vercel.app)
-**Live website : ** [https://parcel-tracking-e1777.web.app/] (https://parcel-tracking-e1777.web.app/)
+**Live website : https://parcel-tracking-e1777.web.app/
 
 
 This is the backend API for the Parcel Tracking Web Application. It provides the core functionality for managing parcels, handling authentication, user roles, and enabling secure communication between the frontend and the database.

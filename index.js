@@ -1221,11 +1221,94 @@ app.get('/parcels/tracking/:trackingNumber', async (req, res) => {
 
 
 
-
-
-
-
-
+// Add this to your routes
+app.get('/admin/dashboard-stats', verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    // Total parcels
+    const totalParcels = await parcelCollection.countDocuments();
+    
+    // Parcel status counts
+    const delivered = await parcelCollection.countDocuments({ status: 'delivered' });
+    const inTransit = await parcelCollection.countDocuments({ status: 'in_transit' });
+    const processing = await parcelCollection.countDocuments({ status: 'processing' });
+    const cancelled = await parcelCollection.countDocuments({ status: 'cancelled' });
+    
+    // User stats
+    const totalUsers = await userCollection.countDocuments();
+    const newThisMonth = await userCollection.countDocuments({
+      createdAt: { $gte: new Date(new Date().setDate(1)) }
+    });
+    
+    // Monthly parcel stats (last 6 months)
+    const monthlyStats = await parcelCollection.aggregate([
+      {
+        $group: {
+          _id: { $month: "$createdAt" },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { "_id": 1 } },
+      { $limit: 6 }
+    ]).toArray();
+    
+    // User growth (last 6 months)
+    const userGrowth = await userCollection.aggregate([
+      {
+        $group: {
+          _id: { $month: "$createdAt" },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { "_id": 1 } },
+      { $limit: 6 }
+    ]).toArray();
+    
+    // Recent activity
+    const recentActivity = await parcelCollection.aggregate([
+      { $sort: { updatedAt: -1 } },
+      { $limit: 5 },
+      {
+        $project: {
+          message: {
+            $concat: [
+              "Parcel ", "$trackingNumber", 
+              " status updated to ", "$status"
+            ]
+          },
+          type: "delivery",
+          timestamp: "$updatedAt"
+        }
+      }
+    ]).toArray();
+    
+    res.json({
+      parcels: {
+        total: totalParcels,
+        delivered,
+        inTransit,
+        processing,
+        cancelled
+      },
+      users: {
+        total: totalUsers,
+        newThisMonth
+      },
+      monthlyStats: monthlyStats.map(month => ({
+        month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
+        count: month.count
+      })),
+      userGrowth: userGrowth.map(month => ({
+        month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
+        count: month.count
+      })),
+      recentActivity
+    });
+    
+  } catch (error) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch dashboard stats' });
+  }
+});
 
 
 

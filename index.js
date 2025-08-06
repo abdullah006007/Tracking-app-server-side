@@ -12,7 +12,10 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-const serviceAccount = require("./firebase-admin-key.json");
+
+const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+
+const serviceAccount = JSON.parse(decodedKey)
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
@@ -30,18 +33,17 @@ const client = new MongoClient(uri, {
 });
 
 // Database collections
-let db, userCollection, parcelCollection, paymentsCollection, ridersCollection, trackingCollection, assignmentsCollection;
+let db, userCollection, parcelCollection, paymentsCollection, ridersCollection, trackingCollection;
 
 async function connectDB() {
     try {
         // await client.connect();
         db = client.db('parcelDB');
-        userCollection = db.collection('users')
+        userCollection = db.collection('users');
         parcelCollection = db.collection('parcels');
         paymentsCollection = db.collection('payments');
         ridersCollection = db.collection('riders');
         trackingCollection = db.collection('tracking');
-        assignmentsCollection = db.collection('assignments');
 
         // Create indexes
         await parcelCollection.createIndex({ trackingNumber: 1 });
@@ -54,11 +56,25 @@ async function connectDB() {
         console.log("✅ Connected to MongoDB!");
     } catch (error) {
         console.error("❌ MongoDB connection failed:", error);
+        // In case of connection failure, try to reconnect
+        setTimeout(connectDB, 5000);
     }
 }
-connectDB();
 
-// custom middleware
+// Start the server only after DB connection is established
+async function startServer() {
+    try {
+        await connectDB();
+        app.listen(port, () => {
+            console.log(`🚀 Server is running on http://localhost:${port}`);
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error);
+        process.exit(1);
+    }
+}
+
+// Custom middleware
 const verifyFBToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
 
@@ -70,65 +86,67 @@ const verifyFBToken = async (req, res, next) => {
         return res.status(401).send({ message: 'unauthorized access' });
     }
 
-    // verify token
     try {
         const decoded = await admin.auth().verifyIdToken(token);
         req.decoded = decoded;
         next();
-    }
-    catch (error) {
+    } catch (error) {
         return res.status(403).send({ message: 'forbidden access' });
     }
+};
 
-}
-
-
-
-
-
-
-
-// verifyAdmin
 const verifyAdmin = async (req, res, next) => {
     const email = req.decoded.email;
-    const query = { email }
-    const user = await userCollection.findOne(query)
+    const query = { email };
+    const user = await userCollection.findOne(query);
     if (!user || user.role !== 'admin') {
-        return res.status(403).send({ message: 'forbidden access' })
+        return res.status(403).send({ message: 'forbidden access' });
     }
     next();
-}
+};
 
+const verifyRider = async (req, res, next) => {
+    const email = req.decoded.email;
+    const query = { email };
+    const user = await userCollection.findOne(query);
+    if (!user || user.role !== 'rider') {
+        return res.status(403).send({ message: 'forbidden access' });
+    }
+    next();
+};
 
-
-
-// Helper middleware for error handling
 const asyncHandler = (fn) => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
+
+// Helper function for default locations
+function getDefaultLocation(status) {
+    const locationMap = {
+        order_confirmed: 'China',
+        quality_inspection: 'China',
+        passed_inspection: 'China',
+        packed_for_warehouse: 'China',
+        arrived_at_warehouse: 'Foreign Trade Warehouse (China)',
+        awaiting_departure: 'Foreign Trade Warehouse (China)',
+        international_shipping: 'In Transit (International)',
+        arrived_at_customs: 'Destination Customs',
+        clearance_finished: 'Local Warehouse',
+        arrived_at_local_warehouse: 'Local Warehouse',
+        local_quality_check: 'Local Warehouse',
+        awaiting_courier: 'Local Warehouse',
+        in_transit: 'Local Delivery',
+        delivered: 'Delivered to Recipient',
+        cancelled: 'Cancelled'
+    };
+    return locationMap[status] || 'Unknown Location';
+}
 
 // Routes
 app.get('/', (req, res) => {
     res.send('📦 Parcel Tracking Server is Running');
 });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// user role
-
-// GET: Get user role by email
+// User routes
 app.get('/users/role/:email', verifyFBToken, async (req, res) => {
     try {
         const email = req.params.email;
@@ -137,7 +155,6 @@ app.get('/users/role/:email', verifyFBToken, async (req, res) => {
             return res.status(400).json({ message: 'Email is required' });
         }
 
-        // Verify the requesting user can only check their own role
         if (req.decoded.email !== email) {
             return res.status(403).json({ message: 'Unauthorized access' });
         }
@@ -158,39 +175,6 @@ app.get('/users/role/:email', verifyFBToken, async (req, res) => {
     }
 });
 
-
-
-
-
-
-// app.get('/parcels', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
-//     const { status, email } = req.query;
-//     const filter = {};
-
-//     if (email) {
-//         filter.userEmail = email;
-//     }
-//     if (status) {
-//         filter['deliveryStatus.status'] = status;
-//     }
-
-//     const parcels = await parcelCollection.find(filter)
-//         .sort({ _id: -1 })
-//         .toArray();
-
-//     res.json(parcels);
-// }));
-
-
-
-
-
-
-
-
-
-
-// User routes
 app.post('/users', async (req, res) => {
     const email = req.body.email;
     const userExists = await userCollection.findOne({ email });
@@ -206,16 +190,86 @@ app.post('/users', async (req, res) => {
     res.send(result);
 });
 
+app.get('/users/:email', verifyFBToken, async (req, res) => {
+    try {
+        const { email } = req.params;
+        const user = await userCollection.findOne({ email });
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        const { password, ...userData } = user;
+        res.json({
+            success: true,
+            data: userData
+        });
+    } catch (error) {
+        console.error('Error fetching user:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch user data'
+        });
+    }
+});
+
+app.put('/users/update', verifyFBToken, async (req, res) => {
+    try {
+        const { email, updates } = req.body;
+
+        if (req.decoded.email !== email) {
+            return res.status(403).json({
+                success: false,
+                message: 'Unauthorized to update this profile'
+            });
+        }
+
+        const updateData = {
+            name: updates.name,
+            phone: updates.phone,
+            address: updates.address,
+            photoURL: updates.photoURL,
+            updatedAt: new Date().toISOString()
+        };
+
+        const result = await userCollection.updateOne(
+            { email },
+            { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        const updatedUser = await userCollection.findOne({ email });
+        const { password, ...userData } = updatedUser;
+
+        res.json({
+            success: true,
+            message: 'Profile updated successfully',
+            data: userData
+        });
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update profile'
+        });
+    }
+});
+
 // Parcel routes
 app.get('/parcels', verifyFBToken, asyncHandler(async (req, res) => {
     const { email } = req.query;
-
     const filter = email ? { userEmail: email } : {};
-
     const parcels = await parcelCollection.find(filter)
         .sort({ _id: -1 })
         .toArray();
-
     res.json(parcels);
 }));
 
@@ -237,7 +291,6 @@ app.get('/parcels/:id', asyncHandler(async (req, res) => {
 app.post('/parcels', asyncHandler(async (req, res) => {
     const newParcel = req.body;
 
-    // Basic validation
     if (!newParcel.userEmail || !newParcel.trackingNumber) {
         return res.status(400).json({ message: 'Missing required fields' });
     }
@@ -246,95 +299,246 @@ app.post('/parcels', asyncHandler(async (req, res) => {
     res.status(201).json(result);
 }));
 
+app.delete('/parcels/:id', asyncHandler(async (req, res) => {
+    const { id } = req.params;
 
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: 'Invalid parcel ID' });
+    }
 
+    const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
 
+    if (result.deletedCount === 0) {
+        return res.status(404).json({ message: 'Parcel not found' });
+    }
 
+    res.json({ message: 'Parcel deleted successfully' });
+}));
 
+app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { riderId, riderName, riderPhone, status, deliveryStatus } = req.body;
 
+    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+        return res.status(400).json({ message: 'Invalid ID(s)' });
+    }
 
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const parcelUpdate = await parcelCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
+                    $set: {
+                        assigned_rider_id: new ObjectId(riderId),
+                        assigned_rider_name: riderName,
+                        assigned_rider_phone: riderPhone,
+                        status: status || 'assigned',
+                        updatedAt: new Date().toISOString()
+                    },
+                    $push: {
+                        deliveryStatus: deliveryStatus || {
+                            status: 'in_transit',
+                            date: new Date().toISOString(),
+                            location: 'Warehouse',
+                            details: `Assigned to rider ${riderName}`,
+                            changedBy: req.decoded.email || 'system'
+                        }
+                    }
+                },
+                { session }
+            );
 
+            if (parcelUpdate.modifiedCount === 0) {
+                throw new Error('Parcel not found or update failed');
+            }
 
-// for assign rider 
+            await ridersCollection.updateOne(
+                { _id: new ObjectId(riderId) },
+                {
+                    $set: {
+                        status: 'active',
+                        work_status: 'in_delivery',
+                        updatedAt: new Date().toISOString()
+                    }
+                },
+                { session }
+            );
 
-// Assign rider to a parcel
-// Assign rider to a parcel
-// Updated assign endpoint
-// app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
-//     const { id } = req.params;
-//     const { riderId, riderName, riderPhone, status } = req.body;
+            res.json({
+                success: true,
+                message: 'Rider assigned successfully'
+            });
+        });
+    } catch (error) {
+        console.error('Assignment transaction failed:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to assign rider',
+            error: error.message
+        });
+    } finally {
+        await session.endSession();
+    }
+}));
 
-//     if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
-//         return res.status(400).json({ message: 'Invalid ID(s)' });
-//     }
+app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { status, location, details, changedBy } = req.body;
 
-//     const session = client.startSession();
-//     try {
-//         await session.withTransaction(async () => {
-//             // 1. Update parcel with rider assignment
-//             const parcelUpdate = await parcelCollection.updateOne(
-//                 { _id: new ObjectId(id) },
-//                 {
-//                     $set: {
-//                         assigned_rider_id: new ObjectId(riderId),
-//                         assigned_rider_name: riderName,
-//                         assigned_rider_phone: riderPhone,
-//                         deliveryStatus: status || 'in_transit',
-//                         updatedAt: new Date().toISOString()
-//                     },
-//                     $push: {
-//                         statusHistory: {
-//                             status: status || 'in_transit',
-//                             changedAt: new Date().toISOString(),
-//                             changedBy: req.decoded.email || 'system',
-//                             details: `Assigned to rider ${riderName}`
-//                         }
-//                     }
-//                 },
-//                 { session }
-//             );
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ 
+            success: false,
+            message: 'Invalid parcel ID format'
+        });
+    }
 
-//             if (parcelUpdate.modifiedCount === 0) {
-//                 throw new Error('Parcel not found or update failed');
-//             }
+    const validStatuses = [
+        'order_confirmed', 'quality_inspection', 'passed_inspection',
+        'packed_for_warehouse', 'arrived_at_warehouse', 'awaiting_departure',
+        'international_shipping', 'arrived_at_customs', 'clearance_finished',
+        'arrived_at_local_warehouse', 'local_quality_check', 'awaiting_courier',
+        'in_transit', 'delivered', 'cancelled'
+    ];
 
-//             // 2. Update rider's status
-//             await ridersCollection.updateOne(
-//                 { _id: new ObjectId(riderId) },
-//                 {
-//                     $set: {
-//                         status: 'active',
-//                         work_status: 'in_delivery',
-//                         updatedAt: new Date().toISOString()
-//                     }
-//                 },
-//                 { session }
-//             );
+    if (!validStatuses.includes(status)) {
+        return res.status(400).json({ 
+            success: false,
+            message: 'Invalid status value',
+            validStatuses
+        });
+    }
 
-//             res.json({
-//                 success: true,
-//                 message: 'Rider assigned successfully'
-//             });
-//         });
-//     } catch (error) {
-//         console.error('Assignment transaction failed:', error);
-//         res.status(500).json({
-//             success: false,
-//             message: 'Failed to assign rider',
-//             error: error.message
-//         });
-//     } finally {
-//         await session.endSession();
-//     }
-// }));
+    try {
+        const statusUpdate = {
+            status,
+            date: new Date().toISOString(),
+            location: location || getDefaultLocation(status),
+            details: details || `Status changed to ${status.replace(/_/g, ' ')}`,
+            changedBy: changedBy || 'admin'
+        };
 
+        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
+        if (!parcel) {
+            return res.status(404).json({ 
+                success: false,
+                message: 'Parcel not found'
+            });
+        }
 
+        const updateOperation = {
+            $set: {
+                status: status,
+                updatedAt: new Date().toISOString()
+            },
+            $push: {
+                deliveryStatus: statusUpdate
+            }
+        };
 
+        const result = await parcelCollection.updateOne(
+            { _id: new ObjectId(id) },
+            updateOperation
+        );
 
-// Improved available riders endpoint
+        if (result.modifiedCount === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'No documents were modified'
+            });
+        }
+
+        if (status === 'delivered' && parcel.assigned_rider_id) {
+            await ridersCollection.updateOne(
+                { _id: parcel.assigned_rider_id },
+                { $set: { work_status: 'available' } }
+            );
+        }
+
+        res.json({
+            success: true,
+            message: 'Parcel status updated successfully',
+            data: statusUpdate,
+            modifiedCount: result.modifiedCount
+        });
+    } catch (error) {
+        console.error('[STATUS UPDATE ERROR]', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update status',
+            error: error.message
+        });
+    }
+}));
+
+app.patch('/parcels/:id/assign-rider', verifyFBToken, asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { riderId, riderName, riderPhone } = req.body;
+
+    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
+        return res.status(400).json({ message: 'Invalid ID(s)' });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const parcelUpdate = await parcelCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
+                    $set: {
+                        assigned_rider_id: new ObjectId(riderId),
+                        assigned_rider_name: riderName,
+                        assigned_rider_phone: riderPhone,
+                        updatedAt: new Date().toISOString()
+                    },
+                    $push: {
+                        deliveryStatus: {
+                            status: 'in_transit',
+                            date: new Date().toISOString(),
+                            location: 'Warehouse',
+                            details: `Assigned to rider ${riderName}`,
+                            changedBy: req.decoded.email || 'system'
+                        }
+                    }
+                },
+                { session }
+            );
+
+            if (parcelUpdate.modifiedCount === 0) {
+                throw new Error('Parcel not found or update failed');
+            }
+
+            await ridersCollection.updateOne(
+                { _id: new ObjectId(riderId) },
+                {
+                    $set: {
+                        work_status: 'in_delivery',
+                        updatedAt: new Date().toISOString()
+                    }
+                },
+                { session }
+            );
+
+            res.json({
+                success: true,
+                message: 'Rider assigned successfully'
+            });
+        });
+    } catch (error) {
+        console.error('Assignment transaction failed:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to assign rider',
+            error: error.message
+        });
+    } finally {
+        await session.endSession();
+    }
+}));
+
+// Rider routes
 app.get('/riders/available', verifyFBToken, asyncHandler(async (req, res) => {
     const { district, search } = req.query;
-
     try {
         const query = {
             status: 'active',
@@ -380,8 +584,6 @@ app.get('/riders/available', verifyFBToken, asyncHandler(async (req, res) => {
     }
 }));
 
-
-
 app.get('/parcels/assignable', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const parcels = await parcelCollection.aggregate([
@@ -426,41 +628,6 @@ app.get('/parcels/assignable', verifyFBToken, verifyAdmin, asyncHandler(async (r
     }
 }));
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-app.delete('/parcels/:id', asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ message: 'Invalid parcel ID' });
-    }
-
-    const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0) {
-        return res.status(404).json({ message: 'Parcel not found' });
-    }
-
-    res.json({ message: 'Parcel deleted successfully' });
-}));
-
-// Rider routes - Updated and improved
 app.get('/riders/pending', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const pendingRiders = await ridersCollection.find({ status: "pending" })
@@ -513,23 +680,6 @@ app.get('/riders/active', verifyFBToken, verifyAdmin, asyncHandler(async (req, r
 app.post('/riders', asyncHandler(async (req, res) => {
     try {
         const rider = req.body;
-
-        // Check if rider already exists
-        // const existingRider = await ridersCollection.findOne({ 
-        //     $or: [
-        //         { email: rider.email },
-        //         { phone: rider.phone }
-        //     ]
-        // });
-
-        // if (existingRider) {
-        //     return res.status(400).json({
-        //         success: false,
-        //         message: 'Rider with this email or phone already exists'
-        //     });
-        // }
-
-        // Set default status and timestamps
         const newRider = {
             ...rider,
             status: "pending",
@@ -589,49 +739,77 @@ app.get('/riders/:id', verifyFBToken, verifyAdmin, asyncHandler(async (req, res)
     }
 }));
 
-// app.put('/riders/:id/approve', verifyFBToken, asyncHandler(async (req, res) => {
-//     try {
-//         const { id } = req.params;
+app.put('/riders/:id/approve', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { email } = req.body;
 
-//         if (!ObjectId.isValid(id)) {
-//             return res.status(400).json({
-//                 success: false,
-//                 message: 'Invalid rider ID'
-//             });
-//         }
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid rider ID'
+            });
+        }
 
-//         const result = await ridersCollection.updateOne(
-//             { _id: new ObjectId(id), status: 'pending' },
-//             {
-//                 $set: {
-//                     status: "active",
-//                     updatedAt: new Date()
-//                 }
-//             }
-//         );
+        const session = client.startSession();
+        let result;
 
-//         if (result.modifiedCount === 0) {
-//             return res.status(404).json({
-//                 success: false,
-//                 message: "Rider not found or already processed"
-//             });
-//         }
+        try {
+            await session.withTransaction(async () => {
+                const riderResult = await ridersCollection.updateOne(
+                    { _id: new ObjectId(id), status: 'pending' },
+                    {
+                        $set: {
+                            status: "active",
+                            updatedAt: new Date()
+                        }
+                    },
+                    { session }
+                );
 
-//         res.json({
-//             success: true,
-//             message: "Rider approved successfully",
-//             data: {
-//                 status: 'active'
-//             }
-//         });
-//     } catch (error) {
-//         console.error('Error approving rider:', error);
-//         res.status(500).json({
-//             success: false,
-//             message: 'Failed to approve rider'
-//         });
-//     }
-// }));
+                if (riderResult.modifiedCount === 0) {
+                    throw new Error("Rider not found or already processed");
+                }
+
+                if (email) {
+                    const userResult = await userCollection.updateOne(
+                        { email: email },
+                        {
+                            $set: {
+                                role: 'rider',
+                                updatedAt: new Date().toISOString()
+                            }
+                        },
+                        { session }
+                    );
+
+                    if (userResult.matchedCount === 0) {
+                        console.warn(`No user found with email: ${email}`);
+                    }
+                }
+            });
+
+            result = {
+                success: true,
+                message: "Rider approved and user role updated successfully",
+                data: {
+                    status: 'active'
+                }
+            };
+        } finally {
+            await session.endSession();
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('Error approving rider:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to approve rider',
+            error: error.message
+        });
+    }
+}));
 
 app.put('/riders/:id/reject', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
@@ -677,80 +855,6 @@ app.put('/riders/:id/reject', verifyFBToken, verifyAdmin, asyncHandler(async (re
     }
 }));
 
-
-
-
-
-// assign api 
-// Example backend route (Node.js/Express)
-// app.patch('/parcels/:id/assign', async (req, res) => {
-//     try {
-//         const { 
-//             riderId, 
-//             riderName, 
-//             riderPhone, 
-//             status,
-//             deliveryStatus 
-//         } = req.body;
-
-//         // Update parcel with rider and status
-//         const updatedParcel = await Parcel.findByIdAndUpdate(
-//             req.params.id,
-//             {
-//                 $set: {
-//                     rider: riderId,
-//                     riderName: riderName,
-//                     riderPhone: riderPhone,
-//                     status: status,
-//                     updatedAt: new Date(),
-//                     deliveryStatus: deliveryStatus
-//                 },
-//                 $push: {
-//                     statusHistory: {
-//                         status: status,
-//                         changedAt: new Date(),
-//                         changedBy: req.user?.id || 'system' // fallback to 'system' if no user
-//                     }
-//                 }
-//             },
-//             { new: true }
-//         );
-
-//         if (!updatedParcel) {
-//             return res.status(404).json({ message: 'Parcel not found' });
-//         }
-
-//         res.json({
-//             success: true,
-//             data: {
-//                 _id: updatedParcel._id,
-//                 trackingNumber: updatedParcel.trackingNumber,
-//                 status: updatedParcel.status,
-//                 rider: {
-//                     _id: riderId,
-//                     name: riderName,
-//                     phone: riderPhone
-//                 }
-//             }
-//         });
-//     } catch (error) {
-//         res.status(500).json({ 
-//             success: false,
-//             message: error.message 
-//         });
-//     }
-// });
-
-
-
-
-
-
-
-
-
-
-
 app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
     try {
         const { id } = req.params;
@@ -763,7 +867,6 @@ app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (
             });
         }
 
-        // Validate status
         const validStatuses = ['active', 'inactive', 'deactivated'];
         if (!validStatuses.includes(status)) {
             return res.status(400).json({
@@ -772,7 +875,6 @@ app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (
             });
         }
 
-        // Update rider's status
         const riderResult = await ridersCollection.updateOne(
             { _id: new ObjectId(id) },
             {
@@ -790,10 +892,9 @@ app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (
             });
         }
 
-        // If rider is activated, update user role to 'rider'
         if (status === 'active' && email) {
             const userResult = await userCollection.updateOne(
-                { email: { $regex: `^${email.trim()}$`, $options: 'i' } }, // case-insensitive match
+                { email: { $regex: `^${email.trim()}$`, $options: 'i' } },
                 {
                     $set: { role: 'rider' }
                 }
@@ -806,13 +907,11 @@ app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (
             }
         }
 
-        // Send success response
         res.json({
             success: true,
             message: `Rider status updated to ${status} successfully`,
             data: { status }
         });
-
     } catch (error) {
         console.error('Error updating rider status:', error);
         res.status(500).json({
@@ -821,96 +920,6 @@ app.patch('/riders/:id/status', verifyFBToken, verifyAdmin, asyncHandler(async (
         });
     }
 }));
-
-
-
-
-
-
-
-
-// new put 
-app.put('/riders/:id/approve', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { email } = req.body; // Get email from request body
-
-        if (!ObjectId.isValid(id)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid rider ID'
-            });
-        }
-
-        // Start a session for transaction
-        const session = client.startSession();
-        let result;
-
-        try {
-            await session.withTransaction(async () => {
-                // 1. Update rider status
-                const riderResult = await ridersCollection.updateOne(
-                    { _id: new ObjectId(id), status: 'pending' },
-                    {
-                        $set: {
-                            status: "active",
-                            updatedAt: new Date()
-                        }
-                    },
-                    { session }
-                );
-
-                if (riderResult.modifiedCount === 0) {
-                    throw new Error("Rider not found or already processed");
-                }
-
-                // 2. Update user role to 'rider'
-                if (email) {
-                    const userResult = await userCollection.updateOne(
-                        { email: email },
-                        {
-                            $set: {
-                                role: 'rider',
-                                updatedAt: new Date().toISOString()
-                            }
-                        },
-                        { session }
-                    );
-
-                    if (userResult.matchedCount === 0) {
-                        console.warn(`No user found with email: ${email}`);
-                    }
-                }
-            });
-
-            result = {
-                success: true,
-                message: "Rider approved and user role updated successfully",
-                data: {
-                    status: 'active'
-                }
-            };
-        } finally {
-            await session.endSession();
-        }
-
-        res.json(result);
-    } catch (error) {
-        console.error('Error approving rider:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to approve rider',
-            error: error.message
-        });
-    }
-}));
-
-
-
-
-
-
-
 
 app.delete('/riders/:id', verifyFBToken, asyncHandler(async (req, res) => {
     try {
@@ -968,7 +977,6 @@ app.get('/payments', verifyFBToken, asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'Email parameter is required' });
     }
 
-    // Verify the requesting user owns this data
     if (req.decoded.email !== email) {
         return res.status(403).send({ message: 'forbidden access' });
     }
@@ -983,7 +991,6 @@ app.get('/payments', verifyFBToken, asyncHandler(async (req, res) => {
 app.post('/payments', verifyFBToken, asyncHandler(async (req, res) => {
     const { parcelId, trackingNumber, amount, userEmail, paymentMethod, transactionId } = req.body;
 
-    // Validate required fields
     if (!parcelId || !trackingNumber || !amount || !userEmail || !transactionId) {
         return res.status(400).json({
             success: false,
@@ -994,7 +1001,6 @@ app.post('/payments', verifyFBToken, asyncHandler(async (req, res) => {
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
-            // 1. Save payment record
             const payment = {
                 parcelId: new ObjectId(parcelId),
                 trackingNumber,
@@ -1008,7 +1014,6 @@ app.post('/payments', verifyFBToken, asyncHandler(async (req, res) => {
 
             const paymentResult = await paymentsCollection.insertOne(payment, { session });
 
-            // 2. Update parcel status
             const updateResult = await parcelCollection.updateOne(
                 { _id: new ObjectId(parcelId), trackingNumber },
                 {
@@ -1043,408 +1048,24 @@ app.post('/payments', verifyFBToken, asyncHandler(async (req, res) => {
     }
 }));
 
+app.post('/create-payment-intent', verifyFBToken, asyncHandler(async (req, res) => {
+    const { amountCents, parcelId } = req.body;
 
-
-
-
-// update profile 
-// Get user by email
-app.get('/users/:email', verifyFBToken, async (req, res) => {
-    try {
-        const { email } = req.params;
-
-        const user = await userCollection.findOne({ email });
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        // Remove sensitive data before sending
-        const { password, ...userData } = user;
-
-        res.json({
-            success: true,
-            data: userData
-        });
-    } catch (error) {
-        console.error('Error fetching user:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch user data'
-        });
-    }
-});
-
-// Update user profile
-app.put('/users/update', verifyFBToken, async (req, res) => {
-    try {
-        const { email, updates } = req.body;
-
-        // Verify the requesting user can only update their own profile
-        if (req.decoded.email !== email) {
-            return res.status(403).json({
-                success: false,
-                message: 'Unauthorized to update this profile'
-            });
-        }
-
-        // Prepare update data
-        const updateData = {
-            name: updates.name,
-            phone: updates.phone,
-            address: updates.address,
-            photoURL: updates.photoURL,
-            updatedAt: new Date().toISOString()
-        };
-
-        const result = await userCollection.updateOne(
-            { email },
-            { $set: updateData }
-        );
-
-        if (result.matchedCount === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        // Get updated user data to return
-        const updatedUser = await userCollection.findOne({ email });
-        const { password, ...userData } = updatedUser;
-
-        res.json({
-            success: true,
-            message: 'Profile updated successfully',
-            data: userData
-        });
-    } catch (error) {
-        console.error('Error updating profile:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update profile'
-        });
-    }
-});
-
-
-// Assign rider to parcel
-// app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
-//     const { id } = req.params;
-//     const { riderId, riderName, riderPhone, status } = req.body;
-
-//     if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
-//         return res.status(400).json({ message: 'Invalid ID(s)' });
-//     }
-
-//     const session = client.startSession();
-//     try {
-//         await session.withTransaction(async () => {
-//             // 1. Update parcel with rider assignment
-//             const parcelUpdate = await parcelCollection.updateOne(
-//                 { _id: new ObjectId(id) },
-//                 {
-//                     $set: {
-//                         assigned_rider_id: new ObjectId(riderId),
-//                         assigned_rider_name: riderName,
-//                         assigned_rider_phone: riderPhone,
-//                         deliveryStatus: status || 'in_transit',
-//                         updatedAt: new Date().toISOString()
-//                     },
-//                     $push: {
-//                         statusHistory: {
-//                             status: status || 'in_transit',
-//                             changedAt: new Date().toISOString(),
-//                             changedBy: req.decoded.email || 'system',
-//                             details: `Assigned to rider ${riderName}`
-//                         }
-//                     }
-//                 },
-//                 { session }
-//             );
-
-//             if (parcelUpdate.modifiedCount === 0) {
-//                 throw new Error('Parcel not found or update failed');
-//             }
-
-//             // 2. Update rider's status
-//             await ridersCollection.updateOne(
-//                 { _id: new ObjectId(riderId) },
-//                 {
-//                     $set: {
-//                         status: 'active',
-//                         work_status: 'in_delivery',
-//                         updatedAt: new Date().toISOString()
-//                     }
-//                 },
-//                 { session }
-//             );
-
-//             res.json({
-//                 success: true,
-//                 message: 'Rider assigned successfully'
-//             });
-//         });
-//     } catch (error) {
-//         console.error('Assignment transaction failed:', error);
-//         res.status(500).json({
-//             success: false,
-//             message: 'Failed to assign rider',
-//             error: error.message
-//         });
-//     } finally {
-//         await session.endSession();
-//     }
-// }));
-
-
-
-// Updated assign endpoint
-app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { riderId, riderName, riderPhone, status, deliveryStatus } = req.body;
-
-    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
-        return res.status(400).json({ message: 'Invalid ID(s)' });
+    if (!amountCents || !parcelId) {
+        return res.status(400).json({ error: 'Amount and parcel ID are required' });
     }
 
-    const session = client.startSession();
-    try {
-        await session.withTransaction(async () => {
-            // 1. Update parcel with rider assignment
-            const parcelUpdate = await parcelCollection.updateOne(
-                { _id: new ObjectId(id) },
-                {
-                    $set: {
-                        assigned_rider_id: new ObjectId(riderId),
-                        assigned_rider_name: riderName,
-                        assigned_rider_phone: riderPhone,
-                        status: status || 'assigned',
-                        updatedAt: new Date().toISOString()
-                    },
-                    $push: {
-                        deliveryStatus: deliveryStatus || {
-                            status: 'in_transit',
-                            date: new Date().toISOString(),
-                            location: 'Warehouse',
-                            details: `Assigned to rider ${riderName}`,
-                            changedBy: req.decoded.email || 'system'
-                        }
-                    }
-                },
-                { session }
-            );
+    const paymentIntent = await stripe.paymentIntents.create({
+        amount: parseInt(amountCents),
+        currency: 'usd',
+        metadata: { parcelId }
+    });
 
-            if (parcelUpdate.modifiedCount === 0) {
-                throw new Error('Parcel not found or update failed');
-            }
-
-            // 2. Update rider's status
-            await ridersCollection.updateOne(
-                { _id: new ObjectId(riderId) },
-                {
-                    $set: {
-                        status: 'active',
-                        work_status: 'in_delivery',
-                        updatedAt: new Date().toISOString()
-                    }
-                },
-                { session }
-            );
-
-            res.json({
-                success: true,
-                message: 'Rider assigned successfully'
-            });
-        });
-    } catch (error) {
-        console.error('Assignment transaction failed:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to assign rider',
-            error: error.message
-        });
-    } finally {
-        await session.endSession();
-    }
+    res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id
+    });
 }));
-
-
-
-// Update parcel delivery status
-// Improved status update endpoint
-// Update parcel delivery status - Fixed version
-app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { status, location, details } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ message: 'Invalid parcel ID' });
-    }
-
-    const validStatuses = ['pending', 'in_transit', 'delivered', 'cancelled'];
-    if (!validStatuses.includes(status)) {
-        return res.status(400).json({ message: 'Invalid status value' });
-    }
-
-    const statusUpdate = {
-        status,
-        date: new Date().toISOString(),
-        location: location || 'Unknown',
-        details: details || `Status changed to ${status}`,
-        changedBy: req.decoded.email || 'system'
-    };
-
-    try {
-        // First get the current parcel to check its structure
-        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
-        if (!parcel) {
-            return res.status(404).json({ message: 'Parcel not found' });
-        }
-
-        // Prepare the update based on current structure
-        let updateOperation;
-
-        if (Array.isArray(parcel.deliveryStatus)) {
-            // Case 1: deliveryStatus is already an array
-            updateOperation = {
-                $set: {
-                    updatedAt: new Date().toISOString()
-                },
-                $push: {
-                    deliveryStatus: statusUpdate
-                }
-            };
-        } else if (typeof parcel.deliveryStatus === 'string' || !parcel.deliveryStatus) {
-            // Case 2: deliveryStatus is a string or doesn't exist
-            updateOperation = {
-                $set: {
-                    updatedAt: new Date().toISOString(),
-                    deliveryStatus: [statusUpdate] // Initialize as array with first status
-                }
-            };
-        } else {
-            // Unknown structure - handle error
-            return res.status(400).json({
-                message: 'Invalid deliveryStatus format in database'
-            });
-        }
-
-        const result = await parcelCollection.updateOne(
-            { _id: new ObjectId(id) },
-            updateOperation
-        );
-
-        if (result.modifiedCount === 0) {
-            return res.status(404).json({ message: 'Parcel not found or status unchanged' });
-        }
-
-        // If status is delivered, update rider's status to available
-        if (status === 'delivered') {
-            if (parcel.assigned_rider_id) {
-                await ridersCollection.updateOne(
-                    { _id: parcel.assigned_rider_id },
-                    { $set: { work_status: 'available' } }
-                );
-            }
-        }
-
-        res.json({
-            success: true,
-            message: 'Parcel status updated successfully',
-            data: statusUpdate
-        });
-    } catch (error) {
-        console.error('Error updating status:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update status',
-            error: error.message
-        });
-    }
-}));
-
-
-
-// Assign rider 
-
-// Assign rider to parcel - new endpoint
-app.patch('/parcels/:id/assign-rider', verifyFBToken, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { riderId, riderName, riderPhone } = req.body;
-
-    if (!ObjectId.isValid(id) || !ObjectId.isValid(riderId)) {
-        return res.status(400).json({ message: 'Invalid ID(s)' });
-    }
-
-    const session = client.startSession();
-    try {
-        await session.withTransaction(async () => {
-            // 1. Update parcel with rider assignment
-            const parcelUpdate = await parcelCollection.updateOne(
-                { _id: new ObjectId(id) },
-                {
-                    $set: {
-                        assigned_rider_id: new ObjectId(riderId),
-                        assigned_rider_name: riderName,
-                        assigned_rider_phone: riderPhone,
-                        updatedAt: new Date().toISOString()
-                    },
-                    $push: {
-                        deliveryStatus: {
-                            status: 'in_transit',
-                            date: new Date().toISOString(),
-                            location: 'Warehouse',
-                            details: `Assigned to rider ${riderName}`,
-                            changedBy: req.decoded.email || 'system'
-                        }
-                    }
-                },
-                { session }
-            );
-
-            if (parcelUpdate.modifiedCount === 0) {
-                throw new Error('Parcel not found or update failed');
-            }
-
-            // 2. Update rider's status
-            await ridersCollection.updateOne(
-                { _id: new ObjectId(riderId) },
-                {
-                    $set: {
-                        work_status: 'in_delivery',
-                        updatedAt: new Date().toISOString()
-                    }
-                },
-                { session }
-            );
-
-            res.json({
-                success: true,
-                message: 'Rider assigned successfully'
-            });
-        });
-    } catch (error) {
-        console.error('Assignment transaction failed:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to assign rider',
-            error: error.message
-        });
-    } finally {
-        await session.endSession();
-    }
-}));
-
-
-
-
-
-
-
-// admin role
 
 // Admin routes
 app.get('/admin/users/search', verifyFBToken, verifyAdmin, asyncHandler(async (req, res) => {
@@ -1459,7 +1080,6 @@ app.get('/admin/users/search', verifyFBToken, verifyAdmin, asyncHandler(async (r
             query.role = role;
         }
 
-        // Only return essential fields
         const users = await userCollection.find(query)
             .project({ email: 1, role: 1, createdAt: 1, name: 1, _id: 1 })
             .sort({ createdAt: -1 })
@@ -1556,39 +1176,58 @@ app.put('/admin/users/:id/remove-admin', verifyFBToken, verifyAdmin, asyncHandle
 
 
 
+// GET tracking info by tracking number
+app.get('/parcels/tracking/:trackingNumber', async (req, res) => {
+  try {
+    const parcel = await parcelCollection.findOne({
+      trackingNumber: req.params.trackingNumber
+    });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-app.post('/create-payment-intent', verifyFBToken, asyncHandler(async (req, res) => {
-    const { amountCents, parcelId } = req.body;
-
-    if (!amountCents || !parcelId) {
-        return res.status(400).json({ error: 'Amount and parcel ID are required' });
+    if (!parcel) {
+      return res.status(404).json({
+        success: false,
+        message: "Parcel not found"
+      });
     }
 
-    const paymentIntent = await stripe.paymentIntents.create({
-        amount: parseInt(amountCents),
-        currency: 'usd',
-        metadata: { parcelId }
-    });
+    // Return only necessary tracking data
+    const trackingData = {
+      trackingNumber: parcel.trackingNumber,
+      status: parcel.status,
+      deliveryStatus: parcel.deliveryStatus || [],
+      senderRegion: parcel.senderRegion,
+      receiverRegion: parcel.receiverRegion,
+      assigned_rider: parcel.assigned_rider_name ? {
+        name: parcel.assigned_rider_name,
+        phone: parcel.assigned_rider_phone
+      } : null,
+      createdAt: parcel.createdAt
+    };
 
     res.json({
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id
+      success: true,
+      data: trackingData
     });
-}));
+
+  } catch (error) {
+    console.error("Tracking error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch tracking info"
+    });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1602,8 +1241,5 @@ app.use((err, req, res, next) => {
     });
 });
 
-// Start server
-app.listen(port, () => {
-    console.log(`🚀 Server is running on http://localhost:${port}`);
-});
-
+// Start the server
+startServer();

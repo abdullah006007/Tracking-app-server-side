@@ -12,7 +12,6 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-
 const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
 
 const serviceAccount = JSON.parse(decodedKey)
@@ -56,7 +55,6 @@ async function connectDB() {
         console.log("✅ Connected to MongoDB!");
     } catch (error) {
         console.error("❌ MongoDB connection failed:", error);
-        // In case of connection failure, try to reconnect
         setTimeout(connectDB, 5000);
     }
 }
@@ -382,15 +380,13 @@ app.patch('/parcels/:id/assign', verifyFBToken, asyncHandler(async (req, res) =>
     }
 }));
 
-app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) => {
+// Status update endpoint
+app.patch('/parcels/:id/status', async (req, res) => {
     const { id } = req.params;
-    const { status, location, details, changedBy } = req.body;
+    const { status, location, details, changedBy, CourierGuyCode } = req.body;
 
     if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ 
-            success: false,
-            message: 'Invalid parcel ID format'
-        });
+        return res.status(400).json({ success: false, message: 'Invalid parcel ID format' });
     }
 
     const validStatuses = [
@@ -398,15 +394,11 @@ app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) =>
         'packed_for_warehouse', 'arrived_at_warehouse', 'awaiting_departure',
         'international_shipping', 'arrived_at_customs', 'clearance_finished',
         'arrived_at_local_warehouse', 'local_quality_check', 'awaiting_courier',
-        'in_transit', 'delivered', 'cancelled'
+        'in_transit', 'delivered'
     ];
 
     if (!validStatuses.includes(status)) {
-        return res.status(400).json({ 
-            success: false,
-            message: 'Invalid status value',
-            validStatuses
-        });
+        return res.status(400).json({ success: false, message: 'Invalid status value' });
     }
 
     try {
@@ -418,17 +410,9 @@ app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) =>
             changedBy: changedBy || 'admin'
         };
 
-        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
-        if (!parcel) {
-            return res.status(404).json({ 
-                success: false,
-                message: 'Parcel not found'
-            });
-        }
-
         const updateOperation = {
             $set: {
-                status: status,
+                status,
                 updatedAt: new Date().toISOString()
             },
             $push: {
@@ -436,40 +420,55 @@ app.patch('/parcels/:id/status', verifyFBToken, asyncHandler(async (req, res) =>
             }
         };
 
+        if (CourierGuyCode && status === 'awaiting_courier') {
+            updateOperation.$set.CourierGuyCode = CourierGuyCode;
+        }
+
         const result = await parcelCollection.updateOne(
             { _id: new ObjectId(id) },
             updateOperation
         );
 
         if (result.modifiedCount === 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'No documents were modified'
-            });
-        }
-
-        if (status === 'delivered' && parcel.assigned_rider_id) {
-            await ridersCollection.updateOne(
-                { _id: parcel.assigned_rider_id },
-                { $set: { work_status: 'available' } }
-            );
+            return res.status(404).json({ success: false, message: 'Parcel not found' });
         }
 
         res.json({
             success: true,
             message: 'Parcel status updated successfully',
-            data: statusUpdate,
-            modifiedCount: result.modifiedCount
+            data: statusUpdate
         });
     } catch (error) {
-        console.error('[STATUS UPDATE ERROR]', error);
         res.status(500).json({
             success: false,
             message: 'Failed to update status',
             error: error.message
         });
     }
-}));
+});
+
+// Helper function for default locations
+function getDefaultLocation(status) {
+    const locationMap = {
+        order_confirmed: 'China',
+        quality_inspection: 'China',
+        passed_inspection: 'China',
+        packed_for_warehouse: 'China',
+        arrived_at_warehouse: 'Foreign Trade Warehouse (China)',
+        awaiting_departure: 'Foreign Trade Warehouse (China)',
+        international_shipping: 'In Transit (International)',
+        arrived_at_customs: 'Destination Customs',
+        clearance_finished: 'Local Warehouse',
+        arrived_at_local_warehouse: 'Local Warehouse',
+        local_quality_check: 'Local Warehouse',
+        awaiting_courier: 'Local Warehouse',
+        in_transit: 'Local Delivery',
+        delivered: 'Delivered to Recipient'
+    };
+    return locationMap[status] || 'Unknown Location';
+}
+
+
 
 app.patch('/parcels/:id/assign-rider', verifyFBToken, asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -1171,144 +1170,152 @@ app.put('/admin/users/:id/remove-admin', verifyFBToken, verifyAdmin, asyncHandle
     }
 }));
 
-
-
-
-
-
 // GET tracking info by tracking number
 app.get('/parcels/tracking/:trackingNumber', async (req, res) => {
-  try {
-    const parcel = await parcelCollection.findOne({
-      trackingNumber: req.params.trackingNumber
-    });
+    try {
+        const parcel = await parcelCollection.findOne({
+            trackingNumber: req.params.trackingNumber
+        });
 
-    if (!parcel) {
-      return res.status(404).json({
-        success: false,
-        message: "Parcel not found"
-      });
+        if (!parcel) {
+            return res.status(404).json({
+                success: false,
+                message: "Parcel not found"
+            });
+        }
+
+        // Return only necessary tracking data
+        const trackingData = {
+            trackingNumber: parcel.trackingNumber,
+            status: parcel.status,
+            deliveryStatus: parcel.deliveryStatus || [],
+            senderRegion: parcel.senderRegion,
+            receiverRegion: parcel.receiverRegion,
+            CourierGuyCode: parcel.CourierGuyCode,
+            assigned_rider: parcel.assigned_rider_name ? {
+                name: parcel.assigned_rider_name,
+                phone: parcel.assigned_rider_phone
+            } : null,
+            createdAt: parcel.createdAt
+        };
+
+        res.json({
+            success: true,
+            data: trackingData
+        });
+
+    } catch (error) {
+        console.error("Tracking error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch tracking info"
+        });
     }
-
-    // Return only necessary tracking data
-    const trackingData = {
-      trackingNumber: parcel.trackingNumber,
-      status: parcel.status,
-      deliveryStatus: parcel.deliveryStatus || [],
-      senderRegion: parcel.senderRegion,
-      receiverRegion: parcel.receiverRegion,
-      assigned_rider: parcel.assigned_rider_name ? {
-        name: parcel.assigned_rider_name,
-        phone: parcel.assigned_rider_phone
-      } : null,
-      createdAt: parcel.createdAt
-    };
-
-    res.json({
-      success: true,
-      data: trackingData
-    });
-
-  } catch (error) {
-    console.error("Tracking error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch tracking info"
-    });
-  }
 });
-
-
-
 
 // Add this to your routes
 app.get('/admin/dashboard-stats', verifyFBToken, verifyAdmin, async (req, res) => {
-  try {
-    // Total parcels
-    const totalParcels = await parcelCollection.countDocuments();
-    
-    // Parcel status counts
-    const delivered = await parcelCollection.countDocuments({ status: 'delivered' });
-    const inTransit = await parcelCollection.countDocuments({ status: 'in_transit' });
-    const processing = await parcelCollection.countDocuments({ status: 'processing' });
-    const cancelled = await parcelCollection.countDocuments({ status: 'cancelled' });
-    
-    // User stats
-    const totalUsers = await userCollection.countDocuments();
-    const newThisMonth = await userCollection.countDocuments({
-      createdAt: { $gte: new Date(new Date().setDate(1)) }
-    });
-    
-    // Monthly parcel stats (last 6 months)
-    const monthlyStats = await parcelCollection.aggregate([
-      {
-        $group: {
-          _id: { $month: "$createdAt" },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { "_id": 1 } },
-      { $limit: 6 }
-    ]).toArray();
-    
-    // User growth (last 6 months)
-    const userGrowth = await userCollection.aggregate([
-      {
-        $group: {
-          _id: { $month: "$createdAt" },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { "_id": 1 } },
-      { $limit: 6 }
-    ]).toArray();
-    
-    // Recent activity
-    const recentActivity = await parcelCollection.aggregate([
-      { $sort: { updatedAt: -1 } },
-      { $limit: 5 },
-      {
-        $project: {
-          message: {
-            $concat: [
-              "Parcel ", "$trackingNumber", 
-              " status updated to ", "$status"
-            ]
-          },
-          type: "delivery",
-          timestamp: "$updatedAt"
-        }
-      }
-    ]).toArray();
-    
-    res.json({
-      parcels: {
-        total: totalParcels,
-        delivered,
-        inTransit,
-        processing,
-        cancelled
-      },
-      users: {
-        total: totalUsers,
-        newThisMonth
-      },
-      monthlyStats: monthlyStats.map(month => ({
-        month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
-        count: month.count
-      })),
-      userGrowth: userGrowth.map(month => ({
-        month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
-        count: month.count
-      })),
-      recentActivity
-    });
-    
-  } catch (error) {
-    console.error('Dashboard stats error:', error);
-    res.status(500).json({ error: 'Failed to fetch dashboard stats' });
-  }
+    try {
+        // Total parcels
+        const totalParcels = await parcelCollection.countDocuments();
+        
+        // Parcel status counts
+        const delivered = await parcelCollection.countDocuments({ status: 'delivered' });
+        const inTransit = await parcelCollection.countDocuments({ status: 'in_transit' });
+        const processing = await parcelCollection.countDocuments({ status: 'processing' });
+        const cancelled = await parcelCollection.countDocuments({ status: 'cancelled' });
+        
+        // User stats
+        const totalUsers = await userCollection.countDocuments();
+        const newThisMonth = await userCollection.countDocuments({
+            createdAt: { $gte: new Date(new Date().setDate(1)) }
+        });
+        
+        // Monthly parcel stats (last 6 months)
+        const monthlyStats = await parcelCollection.aggregate([
+            {
+                $group: {
+                    _id: { $month: "$createdAt" },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id": 1 } },
+            { $limit: 6 }
+        ]).toArray();
+        
+        // User growth (last 6 months)
+        const userGrowth = await userCollection.aggregate([
+            {
+                $group: {
+                    _id: { $month: "$createdAt" },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id": 1 } },
+            { $limit: 6 }
+        ]).toArray();
+        
+        // Recent activity
+        const recentActivity = await parcelCollection.aggregate([
+            { $sort: { updatedAt: -1 } },
+            { $limit: 5 },
+            {
+                $project: {
+                    message: {
+                        $concat: [
+                            "Parcel ", "$trackingNumber", 
+                            " status updated to ", "$status"
+                        ]
+                    },
+                    type: "delivery",
+                    timestamp: "$updatedAt"
+                }
+            }
+        ]).toArray();
+        
+        res.json({
+            parcels: {
+                total: totalParcels,
+                delivered,
+                inTransit,
+                processing,
+                cancelled
+            },
+            users: {
+                total: totalUsers,
+                newThisMonth
+            },
+            monthlyStats: monthlyStats.map(month => ({
+                month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
+                count: month.count
+            })),
+            userGrowth: userGrowth.map(month => ({
+                month: new Date(2023, month._id - 1).toLocaleString('default', { month: 'short' }),
+                count: month.count
+            })),
+            recentActivity
+        });
+        
+    } catch (error) {
+        console.error('Dashboard stats error:', error);
+        res.status(500).json({ error: 'Failed to fetch dashboard stats' });
+    }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
